@@ -28,12 +28,23 @@ py app.py
 
 Open http://127.0.0.1:5000 in your browser. Press `Ctrl+C` in the terminal to stop it.
 
+## Share a hosted test version
+
+The repository is the app's source code; it is not itself a hosted service. To share a URL, deploy this project to a Python web host that supports a `Procfile`, then set these environment variables in the host's service settings:
+
+- `FETCHBOX_USERNAME`: the shared login name for testers
+- `FETCHBOX_PASSWORD`: a strong, unique shared password
+
+The `Procfile` starts the production server through `wsgi.py`, which refuses to start unless both credentials are set. Share the deployment's HTTPS URL and the credentials only with your testers. Do not use the Flask development server for a public deployment.
+
+The app also limits each server process to 60 lookups per minute, 10 downloads per hour, and 2 simultaneous downloads. These are shared limits for everyone using that deployment and reset when its process restarts. Use a host with HTTPS, and do not put secrets in the repository.
+
 ## Troubleshooting
 
 - **Downloads suddenly fail:** update yt-dlp with `py -m pip install -U yt-dlp`.
 - **`pip` or `python` not recognized on Windows:** use `py -m pip` and `py` instead, or reinstall Python with "Add python.exe to PATH" ticked.
-- **Use it from your phone:** install [Tailscale](https://tailscale.com) on both devices, change the last line of `app.py` to `app.run(host="0.0.0.0", port=5000)`, and open `http://<your-pc-tailscale-address>:5000`. Only do this on a private network, since the app has no login.
+- **Use it from your phone:** install [Tailscale](https://tailscale.com) on both devices, set `FETCHBOX_USERNAME` and `FETCHBOX_PASSWORD`, then run `app.py` with `FETCHBOX_HOST=0.0.0.0`. Open `http://<your-pc-tailscale-address>:5000`.
 
 ## Notes
 
-The server listens on `127.0.0.1` only, so it is not reachable from the internet by default. Fetchbox is a personal tool and is not built to be hosted publicly. It has no login or usage limits.
+The server listens on `127.0.0.1` only by default, so it is not reachable from the internet. The built-in rate limits are per process, not a replacement for host-level quotas or monitoring.

@@ -7,15 +7,92 @@ Run:  py app.py   then open http://127.0.0.1:5000
 import os
 import shutil
 import tempfile
+import threading
+import time
+from collections import deque
+from functools import wraps
+from hmac import compare_digest
 from urllib.parse import urlparse
 
 import imageio_ffmpeg
 import yt_dlp
-from flask import Flask, jsonify, request, send_file
+from flask import Flask, Response, jsonify, request, send_file
 
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = 16 * 1024
 FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
 BITRATES = (64, 128, 192, 320)
+AUTH_USERNAME = os.environ.get("FETCHBOX_USERNAME", "")
+AUTH_PASSWORD = os.environ.get("FETCHBOX_PASSWORD", "")
+if bool(AUTH_USERNAME) != bool(AUTH_PASSWORD):
+    raise RuntimeError("Set both FETCHBOX_USERNAME and FETCHBOX_PASSWORD.")
+
+LOOKUP_LIMIT = 60
+LOOKUP_WINDOW = 60
+DOWNLOAD_LIMIT = 10
+DOWNLOAD_WINDOW = 60 * 60
+MAX_CONCURRENT_DOWNLOADS = 2
+request_times = {"lookup": deque(), "download": deque()}
+request_lock = threading.Lock()
+download_slots = threading.BoundedSemaphore(MAX_CONCURRENT_DOWNLOADS)
+
+
+def require_auth(view):
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        if AUTH_USERNAME and AUTH_PASSWORD:
+            auth = request.authorization
+            if not auth or not (
+                compare_digest(auth.username or "", AUTH_USERNAME)
+                and compare_digest(auth.password or "", AUTH_PASSWORD)
+            ):
+                return Response(
+                    "Authentication required",
+                    401,
+                    {"WWW-Authenticate": 'Basic realm="Fetchbox"'},
+                )
+        return view(*args, **kwargs)
+
+    return wrapped
+
+
+@app.before_request
+def limit_api_requests():
+    if AUTH_USERNAME and AUTH_PASSWORD:
+        auth = request.authorization
+        if not auth or not (
+            compare_digest(auth.username or "", AUTH_USERNAME)
+            and compare_digest(auth.password or "", AUTH_PASSWORD)
+        ):
+            return Response(
+                "Authentication required",
+                401,
+                {"WWW-Authenticate": 'Basic realm="Fetchbox"'},
+            )
+
+    if request.content_length and request.content_length > app.config["MAX_CONTENT_LENGTH"]:
+        return jsonify(error="Request body is too large."), 413
+
+    limits = {
+        "/api/info": ("lookup", LOOKUP_LIMIT, LOOKUP_WINDOW),
+        "/api/download": ("download", DOWNLOAD_LIMIT, DOWNLOAD_WINDOW),
+    }
+    limit = limits.get(request.path)
+    if request.method != "POST" or not limit:
+        return None
+
+    bucket, maximum, window = limit
+    now = time.monotonic()
+    with request_lock:
+        times = request_times[bucket]
+        while times and now - times[0] >= window:
+            times.popleft()
+        if len(times) >= maximum:
+            return jsonify(error="Usage limit reached. Please try again later."), 429, {
+                "Retry-After": str(max(1, int(window - (now - times[0]))))
+            }
+        times.append(now)
+    return None
 
 
 def clean_error(e):
@@ -39,8 +116,10 @@ def coerce_int(value, default):
 
 
 @app.post("/api/info")
+@require_auth
 def info():
-    url = (request.json or {}).get("url", "").strip()
+    data = request.get_json(silent=True)
+    url = str(data.get("url", "")).strip() if isinstance(data, dict) else ""
     if not valid(url):
         return jsonify(error="Paste a full link starting with https://"), 400
     try:
@@ -78,37 +157,40 @@ def info():
 
 
 @app.post("/api/download")
+@require_auth
 def download():
-    data = request.json or {}
+    data = request.get_json(silent=True)
+    data = data if isinstance(data, dict) else {}
     url = str(data.get("url", "")).strip()
     kind = str(data.get("kind", "video")).lower()
     if not valid(url):
         return jsonify(error="Paste a full link starting with https://"), 400
+    if not download_slots.acquire(blocking=False):
+        return jsonify(error="The download queue is full. Please try again shortly."), 429
 
-    tmp = tempfile.mkdtemp(prefix="fetchbox_")
-    opts = {
-        "quiet": True,
-        "noplaylist": True,
-        "ffmpeg_location": FFMPEG,
-        "outtmpl": os.path.join(tmp, "%(title).100s.%(ext)s"),
-    }
-    if kind == "audio":
-        br = coerce_int(data.get("bitrate"), 192)
-        br = br if br in BITRATES else 192
-        opts["format"] = "bestaudio/best"
-        opts["postprocessors"] = [
-            {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": str(br)}
-        ]
-    else:
-        h = coerce_int(data.get("height"), 4320)
-        if h <= 0:
-            h = 4320
-        opts["format"] = (
-            f"bv*[height<={h}][ext=mp4]+ba[ext=m4a]/bv*[height<={h}]+ba/b[height<={h}]/b"
-        )
-        opts["merge_output_format"] = "mp4"
-
+    tmp = None
     try:
+        tmp = tempfile.mkdtemp(prefix="fetchbox_")
+        opts = {
+            "quiet": True,
+            "noplaylist": True,
+            "ffmpeg_location": FFMPEG,
+            "outtmpl": os.path.join(tmp, "%(title).100s.%(ext)s"),
+        }
+        if kind == "audio":
+            br = coerce_int(data.get("bitrate"), 192)
+            br = br if br in BITRATES else 192
+            opts["format"] = "bestaudio/best"
+            opts["postprocessors"] = [
+                {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": str(br)}
+            ]
+        else:
+            h = coerce_int(data.get("height"), 4320)
+            opts["format"] = (
+                f"bv*[height<={h}][ext=mp4]+ba[ext=m4a]/bv*[height<={h}]+ba/b[height<={h}]/b"
+            )
+            opts["merge_output_format"] = "mp4"
+
         with yt_dlp.YoutubeDL(opts) as ydl:
             ydl.download([url])
         candidates = [
@@ -119,16 +201,23 @@ def download():
         if not candidates:
             raise FileNotFoundError("No file was produced for this download.")
         path = max(candidates, key=os.path.getmtime)
+        resp = send_file(path, as_attachment=True, download_name=os.path.basename(path))
     except Exception as e:
-        shutil.rmtree(tmp, ignore_errors=True)
+        if tmp:
+            shutil.rmtree(tmp, ignore_errors=True)
+        download_slots.release()
         return jsonify(error=clean_error(e)), 400
 
-    resp = send_file(path, as_attachment=True, download_name=os.path.basename(path))
-    resp.call_on_close(lambda: shutil.rmtree(tmp, ignore_errors=True))
+    def cleanup():
+        shutil.rmtree(tmp, ignore_errors=True)
+        download_slots.release()
+
+    resp.call_on_close(cleanup)
     return resp
 
 
 @app.get("/")
+@require_auth
 def home():
     return PAGE
 
@@ -365,5 +454,11 @@ $("url").onkeydown = e => { if (e.key === "Enter") lookup(); };
 """
 
 if __name__ == "__main__":
-    # Bound to localhost only: this is a personal tool, not a public service.
-    app.run(host="127.0.0.1", port=5000)
+    host = os.environ.get("FETCHBOX_HOST", "127.0.0.1")
+    if host not in {"127.0.0.1", "localhost", "::1"} and not (
+        AUTH_USERNAME and AUTH_PASSWORD
+    ):
+        raise RuntimeError(
+            "Remote access requires FETCHBOX_USERNAME and FETCHBOX_PASSWORD."
+        )
+    app.run(host=host, port=int(os.environ.get("PORT", "5000")))
