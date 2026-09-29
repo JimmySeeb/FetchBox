@@ -30,14 +30,14 @@ Open http://127.0.0.1:5000 in your browser. Press `Ctrl+C` in the terminal to st
 
 ## Share a hosted test version
 
-The repository is the app's source code; it is not itself a hosted service. To share a URL, deploy this project to a Python web host that supports a `Procfile`, then set these environment variables in the host's service settings:
+The repository is the app's source code; it is not itself a hosted service. To share a URL, deploy this project to a Python web host that supports a `Procfile`. The app starts without credentials, so anyone who knows the deployment URL can use it. For a private test, set both of these environment variables in the host's service settings to enable HTTP Basic Auth:
 
 - `FETCHBOX_USERNAME`: the shared login name for testers
 - `FETCHBOX_PASSWORD`: a strong, unique shared password
 
-The `Procfile` starts the production server through `wsgi.py`, which refuses to start unless both credentials are set. Share the deployment's HTTPS URL and the credentials only with your testers. Do not use the Flask development server for a public deployment.
+If you set either credential, you must set both. Share the deployment's HTTPS URL and, when enabled, credentials only with your testers. Do not use the Flask development server for a public deployment.
 
-The app also limits each server process to 60 lookups per minute, 10 downloads per hour, and 2 simultaneous downloads. These are shared limits for everyone using that deployment and reset when its process restarts. Use a host with HTTPS, and do not put secrets in the repository.
+The app also limits each server process to 60 lookups per minute, 10 downloads per hour, and 2 simultaneous downloads. These are shared limits for everyone using that deployment and reset when its process restarts; they are not a replacement for authentication or host-level quotas. Use a host with HTTPS, and do not put secrets in the repository.
 
 ## Troubleshooting
 
