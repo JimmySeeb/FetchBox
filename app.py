@@ -7,6 +7,7 @@ Run:  py app.py   then open http://127.0.0.1:5000
 import os
 import shutil
 import tempfile
+from urllib.parse import urlparse
 
 import imageio_ffmpeg
 import yt_dlp
@@ -22,7 +23,19 @@ def clean_error(e):
 
 
 def valid(url):
-    return url.startswith(("http://", "https://"))
+    try:
+        parsed = urlparse(url.strip())
+    except Exception:
+        return False
+    return parsed.scheme.lower() in {"http", "https"} and bool(parsed.netloc)
+
+
+def coerce_int(value, default):
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
 
 
 @app.post("/api/info")
@@ -32,9 +45,12 @@ def info():
         return jsonify(error="Paste a full link starting with https://"), 400
     try:
         with yt_dlp.YoutubeDL({"quiet": True, "noplaylist": True}) as ydl:
-            d = ydl.extract_info(url, download=False)
+            d = ydl.extract_info(url, download=False) or {}
     except Exception as e:
         return jsonify(error=clean_error(e)), 400
+
+    if not isinstance(d, dict):
+        return jsonify(error="Could not read that video."), 400
 
     heights, audio_size = {}, 0
     for f in d.get("formats") or []:
@@ -49,21 +65,23 @@ def info():
         {"height": h, "size": (s + audio_size) if s else None}
         for h, s in sorted(heights.items(), reverse=True)
     ]
+    duration = coerce_int(d.get("duration"), 0)
     return jsonify(
         title=d.get("title"),
         channel=d.get("uploader"),
         thumbnail=d.get("thumbnail"),
-        duration=d.get("duration"),
+        duration=duration,
         license=d.get("license") or "Standard licence",
         video=video,
-        audio_seconds=d.get("duration"),
+        audio_seconds=duration,
     )
 
 
 @app.post("/api/download")
 def download():
     data = request.json or {}
-    url, kind = data.get("url", "").strip(), data.get("kind", "video")
+    url = str(data.get("url", "")).strip()
+    kind = str(data.get("kind", "video")).lower()
     if not valid(url):
         return jsonify(error="Paste a full link starting with https://"), 400
 
@@ -75,16 +93,15 @@ def download():
         "outtmpl": os.path.join(tmp, "%(title).100s.%(ext)s"),
     }
     if kind == "audio":
-        br = data.get("bitrate")
+        br = coerce_int(data.get("bitrate"), 192)
         br = br if br in BITRATES else 192
         opts["format"] = "bestaudio/best"
         opts["postprocessors"] = [
             {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": str(br)}
         ]
     else:
-        try:
-            h = int(data.get("height"))
-        except (TypeError, ValueError):
+        h = coerce_int(data.get("height"), 4320)
+        if h <= 0:
             h = 4320
         opts["format"] = (
             f"bv*[height<={h}][ext=mp4]+ba[ext=m4a]/bv*[height<={h}]+ba/b[height<={h}]/b"
@@ -94,7 +111,14 @@ def download():
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             ydl.download([url])
-        path = os.path.join(tmp, os.listdir(tmp)[0])
+        candidates = [
+            os.path.join(tmp, name)
+            for name in os.listdir(tmp)
+            if os.path.isfile(os.path.join(tmp, name))
+        ]
+        if not candidates:
+            raise FileNotFoundError("No file was produced for this download.")
+        path = max(candidates, key=os.path.getmtime)
     except Exception as e:
         shutil.rmtree(tmp, ignore_errors=True)
         return jsonify(error=clean_error(e)), 400
