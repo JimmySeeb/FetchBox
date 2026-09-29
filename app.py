@@ -96,7 +96,15 @@ def limit_api_requests():
 
 
 def clean_error(e):
-    return str(e).replace("ERROR: ", "").split("\n")[0][:300]
+    message = str(e)
+    if "sign in to confirm" in message.casefold() and "not a bot" in message.casefold():
+        return (
+            "YouTube blocked this request from the hosted server and requires a "
+            "signed-in browser session. The hosted app cannot access your browser. "
+            "Try again later or run Fetchbox locally; do not upload or share your "
+            "YouTube cookies with this service."
+        )
+    return message.replace("ERROR: ", "").split("\n")[0][:300]
 
 
 def valid(url):

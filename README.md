@@ -42,6 +42,7 @@ The app also limits each server process to 60 lookups per minute, 10 downloads p
 ## Troubleshooting
 
 - **Downloads suddenly fail:** update yt-dlp with `py -m pip install -U yt-dlp`.
+- **YouTube says "Sign in to confirm you're not a bot":** YouTube may block requests from cloud-hosting IP addresses. The hosted app cannot use your browser session, and you should not upload personal YouTube cookies to a shared service. Try again later or run Fetchbox locally.
 - **`pip` or `python` not recognized on Windows:** use `py -m pip` and `py` instead, or reinstall Python with "Add python.exe to PATH" ticked.
 - **Use it from your phone:** install [Tailscale](https://tailscale.com) on both devices, set `FETCHBOX_USERNAME` and `FETCHBOX_PASSWORD`, then run `app.py` with `FETCHBOX_HOST=0.0.0.0`. Open `http://<your-pc-tailscale-address>:5000`.
 
